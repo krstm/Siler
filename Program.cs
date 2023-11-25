@@ -38,26 +38,58 @@ namespace Siler
             }
             else if (Directory.Exists(path))
             {
-                var filePaths = Directory.GetFiles(path, "*", SearchOption.AllDirectories);
-                using (var semaphore = new SemaphoreSlim(MaxConcurrentTasks))
-                {
-                    var tasks = new List<Task>();
-
-                    foreach (var filePath in filePaths)
-                    {
-                        await semaphore.WaitAsync();
-
-                        var task = SecureDeleteAsync(filePath).ContinueWith(t => semaphore.Release());
-                        tasks.Add(task);
-                    }
-
-                    await Task.WhenAll(tasks);
-                }
+                await SecureDeleteDirectoryAsync(path);
             }
             else
             {
                 Console.WriteLine("Path does not exist.");
             }
+        }
+
+        /// <summary>
+        /// Asynchronously performs a secure deletion of a specified directory and all its contents.
+        /// This method first securely deletes all files within the directory and its subdirectories.
+        /// It then securely deletes each directory by renaming it to a random name before deletion,
+        /// to reduce the likelihood of recovering the original directory names.
+        /// </summary>
+        /// <param name="directoryPath">The path of the directory to be securely deleted.</param>
+        /// <returns>A Task representing the asynchronous operation of securely deleting the directory and its contents.</returns>
+        private static async Task SecureDeleteDirectoryAsync(string directoryPath)
+        {
+            var filePaths = Directory.GetFiles(directoryPath, "*", SearchOption.AllDirectories);
+            using (var semaphore = new SemaphoreSlim(MaxConcurrentTasks))
+            {
+                var tasks = new List<Task>();
+
+                foreach (var filePath in filePaths)
+                {
+                    await semaphore.WaitAsync();
+
+                    var task = SecureDeleteAsync(filePath).ContinueWith(t => semaphore.Release());
+                    tasks.Add(task);
+                }
+
+                await Task.WhenAll(tasks);
+            }
+
+            var directories = Directory.GetDirectories(directoryPath, "*", SearchOption.AllDirectories);
+
+            foreach (var directory in directories)
+            {
+                var directoryInfo = new DirectoryInfo(directory);
+                string newDirectoryPath;
+                do
+                {
+                    newDirectoryPath = Path.Combine(directoryInfo.Parent.FullName, Path.GetRandomFileName());
+                } while (Directory.Exists(newDirectoryPath));
+
+                Directory.Move(directory, newDirectoryPath);
+                Directory.Delete(newDirectoryPath, false);
+                Console.WriteLine($"Directory securely deleted: {newDirectoryPath}");
+            }
+
+            Directory.Delete(directoryPath, false);
+            Console.WriteLine($"Directory securely deleted: {directoryPath}");
         }
 
         /// <summary>
@@ -137,7 +169,12 @@ namespace Siler
                     await File.WriteAllBytesAsync(filePath, randomBytes);
                 }
 
-                string newFilePath = Path.Combine(fileInfo.DirectoryName, Path.GetRandomFileName());
+                string newFilePath;
+                do
+                {
+                    newFilePath = Path.Combine(fileInfo.DirectoryName, Path.GetRandomFileName());
+                } while (File.Exists(newFilePath));
+
                 File.Move(filePath, newFilePath);
 
                 return newFilePath;
