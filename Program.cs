@@ -1,23 +1,37 @@
-﻿namespace Siler
+﻿using System.Security.Cryptography;
+
+namespace Siler
 {
     internal class Program
     {
-        private static void Main(string[] args)
+        private static readonly int MaxConcurrentTasks = 10;
+        private static readonly int SecureDeletePasses = 3;
+        private static readonly int OverwriteFilePasses = 3;
+
+        private static async Task Main(string[] args)
         {
-            Console.WriteLine("Enter the path (file or directory):");
-            string path = Console.ReadLine();
-            int passes = 3;
+            string path = args.Length > 0 ? args[0] : PromptForPath();
 
             if (File.Exists(path))
             {
-                SecureDelete(path, passes);
+                await SecureDeleteAsync(path);
             }
             else if (Directory.Exists(path))
             {
                 var filePaths = Directory.GetFiles(path, "*", SearchOption.AllDirectories);
-                foreach (string filePath in filePaths)
+                using (var semaphore = new SemaphoreSlim(MaxConcurrentTasks))
                 {
-                    SecureDelete(filePath, passes);
+                    var tasks = new List<Task>();
+
+                    foreach (var filePath in filePaths)
+                    {
+                        await semaphore.WaitAsync();
+
+                        var task = SecureDeleteAsync(filePath).ContinueWith(t => semaphore.Release());
+                        tasks.Add(task);
+                    }
+
+                    await Task.WhenAll(tasks);
                 }
             }
             else
@@ -26,20 +40,21 @@
             }
         }
 
-        /// <summary>
-        /// Securely deletes a file or all files in a directory with multiple passes.
-        /// </summary>
-        /// <param name="filePath">Path of the file or directory to be securely deleted.</param>
-        /// <param name="passes">Number of overwrite passes to perform.</param>
-        private static void SecureDelete(string filePath, int passes)
+        private static string PromptForPath()
+        {
+            Console.WriteLine("Enter the path (file or directory):");
+            return Console.ReadLine();
+        }
+
+        private static async Task SecureDeleteAsync(string filePath)
         {
             try
             {
                 string currentPath = filePath;
 
-                for (int i = 0; i < passes; i++)
+                for (int i = 0; i < SecureDeletePasses; i++)
                 {
-                    currentPath = OverwriteFile(currentPath);
+                    currentPath = await OverwriteFileAsync(currentPath);
                 }
 
                 File.Delete(currentPath);
@@ -51,12 +66,7 @@
             }
         }
 
-        /// <summary>
-        /// Overwrites a file with various patterns, resizes it, renames it, and returns the new file path.
-        /// </summary>
-        /// <param name="filePath">Path of the file to be overwritten.</param>
-        /// <returns>New path of the overwritten and renamed file.</returns>
-        private static string OverwriteFile(string filePath)
+        private static async Task<string> OverwriteFileAsync(string filePath)
         {
             try
             {
@@ -67,19 +77,20 @@
 
                 using (FileStream stream = fileInfo.Open(FileMode.Open, FileAccess.Write, FileShare.None))
                 {
-                    byte[][] patterns = GeneratePatterns(bufferSize);
-
-                    foreach (var pattern in patterns)
+                    for (int pass = 0; pass < OverwriteFilePasses; pass++)
                     {
-                        for (long i = 0; i < length; i += pattern.Length)
+                        byte[] randomPattern = GenerateRandomPattern(bufferSize);
+                        for (long i = 0; i < length; i += bufferSize)
                         {
-                            stream.Write(pattern, 0, pattern.Length);
-                            stream.Flush();
+                            int bytesToWrite = (int)Math.Min(bufferSize, length - i);
+                            await stream.WriteAsync(randomPattern, 0, bytesToWrite);
+                            await stream.FlushAsync();
                         }
+                        stream.Seek(0, SeekOrigin.Begin);
                     }
                 }
 
-                File.WriteAllBytes(filePath, new byte[128]);
+                await File.WriteAllBytesAsync(filePath, new byte[128]);
 
                 string newFilePath = Path.Combine(fileInfo.DirectoryName, Path.GetRandomFileName());
                 File.Move(filePath, newFilePath);
@@ -93,39 +104,30 @@
             }
         }
 
-        /// <summary>
-        /// Calculates an appropriate buffer size based on the file length.
-        /// </summary>
-        /// <param name="length">Length of the file.</param>
-        /// <returns>Calculated buffer size.</returns>
         private static int CalculateBufferSize(long length)
         {
-            const int minBufferSize = 1024;
-            const int maxBufferSize = 16 * 1024; ;
-            return (int)Math.Min(Math.Max(length / 100, minBufferSize), maxBufferSize);
+            const int minBufferSize = 1024 * 1024;
+            const int maxBufferSize = 16 * 1024 * 1024;
+
+            if (length <= minBufferSize)
+            {
+                return (int)length;
+            }
+            else
+            {
+                long dynamicBufferSize = length / 100;
+                return (int)Math.Min(Math.Max(dynamicBufferSize, minBufferSize), maxBufferSize);
+            }
         }
 
-        /// <summary>
-        /// Generates an array of byte patterns to be used for overwriting files.
-        /// </summary>
-        /// <param name="bufferSize">Size of each byte pattern buffer.</param>
-        /// <returns>An array of byte patterns.</returns>
-        private static byte[][] GeneratePatterns(int bufferSize)
+        private static byte[] GenerateRandomPattern(int bufferSize)
         {
-            return new byte[][]
+            var randomBytes = new byte[bufferSize];
+            using (var rng = new RNGCryptoServiceProvider())
             {
-                new byte[bufferSize],
-                Enumerable.Repeat((byte)0xAA, bufferSize).ToArray(),
-                Enumerable.Repeat((byte)0x55, bufferSize).ToArray(),
-                Enumerable.Range(0, bufferSize).Select(i => (byte)(i % 256)).ToArray(),
-                Enumerable.Range(0, bufferSize).Select(i => (byte)('~')).ToArray(),
-                Enumerable.Range(0, bufferSize).Select(i => (byte)(i % 2 == 0 ? 0x00 : 0xFF)).ToArray(),
-                Enumerable.Range(0, bufferSize).Select(i => (byte)(i)).ToArray(),
-                Enumerable.Range(0, bufferSize).Select(i => (byte)(bufferSize - i % 256)).ToArray(),
-                Enumerable.Range(0, bufferSize).Select(i => (byte)(i % 2 == 0 ? 'A' : 'Z')).ToArray(),
-                Enumerable.Repeat((byte)'*', bufferSize).ToArray(),
-                new byte[bufferSize]
-            };
+                rng.GetBytes(randomBytes);
+            }
+            return randomBytes;
         }
     }
 }
