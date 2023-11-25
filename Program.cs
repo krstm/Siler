@@ -90,7 +90,16 @@ namespace Siler
                     }
                 }
 
-                await File.WriteAllBytesAsync(filePath, new byte[128]);
+                using (var rng = new RNGCryptoServiceProvider())
+                {
+                    byte[] sizeBytes = new byte[4];
+                    rng.GetBytes(sizeBytes);
+                    int randomSize = BitConverter.ToInt32(sizeBytes, 0) & 0x3FF;
+
+                    byte[] randomBytes = new byte[randomSize];
+                    rng.GetBytes(randomBytes);
+                    await File.WriteAllBytesAsync(filePath, randomBytes);
+                }
 
                 string newFilePath = Path.Combine(fileInfo.DirectoryName, Path.GetRandomFileName());
                 File.Move(filePath, newFilePath);
